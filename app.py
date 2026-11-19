@@ -1828,8 +1828,8 @@ def admin_login():
         username = request.form.get("username", "")
         password = request.form.get("password", "")
 
-        correct_username = os.environ.get("ADMIN_USERNAME", "")
-        correct_password = os.environ.get("ADMIN_PASSWORD", "")
+        correct_username = "Apexinvest"
+        correct_password = "Apex@50"
 
         if not correct_username or not correct_password:
             message = "Admin credentials have not been configured."
