@@ -1,0 +1,8 @@
+.env
+*.pyc
+__pycache__/
+app.py.backup*
+app.py.before*
+app.py.dashboard-backup
+app_before_pages_upgrade.py
+*.db
