@@ -24,6 +24,7 @@ DATABASE_URL = os.environ.get(
 def db():
     con = psycopg2.connect(DATABASE_URL)
     cur = con.cursor()
+    cur.execute("CREATE SCHEMA IF NOT EXISTS apexinvest")
     cur.execute("SET search_path TO apexinvest")
     cur.close()
     return con
