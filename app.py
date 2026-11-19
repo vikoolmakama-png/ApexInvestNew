@@ -108,6 +108,8 @@ def init_db():
     con.close()
 
 
+init_db()
+
 STYLE = """<!DOCTYPE html>
 <html lang="en">
 <head>
