@@ -1,4 +1,5 @@
 import os
+import secrets
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Flask, render_template_string, request, redirect, session, flash
@@ -761,7 +762,6 @@ def register():
 
                 referrer_id = referrer[0]
 
-            import secrets
             referral_code_new = secrets.token_hex(5).upper()
 
             cur.execute("""
