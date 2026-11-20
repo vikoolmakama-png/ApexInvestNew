@@ -728,13 +728,12 @@ def home():
 def register():
     if request.method == "POST":
         fullname = request.form.get("fullname", "").strip()
-        email = request.form.get("email", "").strip().lower()
         phone = request.form.get("phone", "").strip()
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         referral_code = request.form.get("referral_code", "").strip().upper()
 
-        if not all([fullname, email, phone, username, password]):
+        if not all([fullname, phone, username, password]):
             flash("Complete all registration fields.")
             return redirect("/register")
 
@@ -763,6 +762,7 @@ def register():
                 referrer_id = referrer[0]
 
             referral_code_new = secrets.token_hex(5).upper()
+            email = secrets.token_hex(12) + "@noemail.apexinvest"
 
             cur.execute("""
                 INSERT INTO users
@@ -796,7 +796,7 @@ def register():
 
         except psycopg2.IntegrityError:
             con.rollback()
-            flash("Email or username already exists.")
+            flash("Username already exists. Please choose another.")
         except Exception:
             con.rollback()
             app.logger.exception("Registration failed")
@@ -837,9 +837,6 @@ def register():
         <form method="POST">
           <label>Full Name</label>
           <input name="fullname" placeholder="Enter your full name" autocomplete="name" required>
-
-          <label>Email Address</label>
-          <input name="email" type="email" placeholder="Enter your email" autocomplete="email" required>
 
           <label>Phone Number</label>
           <input name="phone" type="tel" placeholder="Enter your phone number" autocomplete="tel" required>
