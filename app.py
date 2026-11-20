@@ -47,6 +47,21 @@ def init_db():
     """)
 
     cur.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS referral_code TEXT
+    """)
+
+    cur.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS referred_by INTEGER REFERENCES users(id)
+    """)
+
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS users_referral_code_unique
+        ON users(referral_code)
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS investments (
             id SERIAL PRIMARY KEY,
             user_id INTEGER REFERENCES users(id),
@@ -711,13 +726,14 @@ def home():
 @app.route("/register", methods=["GET","POST"])
 def register():
     if request.method == "POST":
-        fullname = request.form.get("fullname","").strip()
-        email = request.form.get("email","").strip().lower()
-        phone = request.form.get("phone","").strip()
-        username = request.form.get("username","").strip()
-        password = request.form.get("password","")
+        fullname = request.form.get("fullname", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        phone = request.form.get("phone", "").strip()
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        referral_code = request.form.get("referral_code", "").strip().upper()
 
-        if not all([fullname,email,phone,username,password]):
+        if not all([fullname, email, phone, username, password]):
             flash("Complete all registration fields.")
             return redirect("/register")
 
@@ -727,42 +743,64 @@ def register():
 
         con = db()
         cur = con.cursor()
+
         try:
+            referrer_id = None
+
+            if referral_code:
+                cur.execute(
+                    "SELECT id FROM users WHERE UPPER(referral_code)=%s",
+                    (referral_code,)
+                )
+                referrer = cur.fetchone()
+
+                if not referrer:
+                    con.rollback()
+                    flash("Invalid referral code. Please check it.")
+                    return redirect("/register")
+
+                referrer_id = referrer[0]
+
+            import secrets
+            referral_code_new = secrets.token_hex(5).upper()
+
             cur.execute("""
-                INSERT INTO users(fullname,email,phone,username,password)
-                VALUES(%s,%s,%s,%s,%s)
+                INSERT INTO users
+                    (fullname, email, phone, username, password,
+                     balance, referral_code, referred_by)
+                VALUES (%s, %s, %s, %s, %s, 400, %s, %s)
                 RETURNING id
             """, (
                 fullname, email, phone, username,
-                generate_password_hash(password)
+                generate_password_hash(password),
+                referral_code_new, referrer_id
             ))
 
             new_user_id = cur.fetchone()[0]
 
-            # Credit the new user's welcome bonus.
-            cur.execute("""
-                UPDATE users
-                SET balance = balance + 400
-                WHERE id = %s
-            """, (new_user_id,))
+            if referrer_id:
+                cur.execute("""
+                    INSERT INTO referrals(referrer_id, referred_id)
+                    VALUES (%s, %s)
+                """, (referrer_id, new_user_id))
 
-            # Record the bonus in transaction history.
             cur.execute("""
                 INSERT INTO transactions(user_id, type, amount, status)
                 VALUES(%s, %s, %s, %s)
-            """, (
-                new_user_id,
-                "Welcome Bonus",
-                400,
-                "completed"
-            ))
+            """, (new_user_id, "Welcome Bonus", 400, "completed"))
 
             con.commit()
-            flash("Your account has been created successfully. Please login.")
+            flash("Account created successfully. Your referral code is " +
+                  referral_code_new + ". Please login.")
             return redirect("/login")
+
         except psycopg2.IntegrityError:
             con.rollback()
             flash("Email or username already exists.")
+        except Exception:
+            con.rollback()
+            app.logger.exception("Registration failed")
+            flash("Registration failed. Please try again.")
         finally:
             cur.close()
             con.close()
@@ -811,6 +849,9 @@ def register():
 
           <label>Create Password</label>
           <input name="password" type="password" placeholder="At least 8 characters" minlength="8" autocomplete="new-password" required>
+
+          <label>Referral Code (optional)</label>
+          <input name="referral_code" value="{{ request.args.get('ref', '')|e }}" placeholder="Enter your friend's referral code" autocomplete="off">
 
           <button class="auth-submit" type="submit">CREATE MY ACCOUNT →</button>
         </form>
@@ -894,6 +935,219 @@ def login():
     </main>
     """)
 
+
+
+
+@app.route("/referrals")
+def referrals():
+    if not session.get("user_id"):
+        return redirect("/login")
+
+    con = db()
+    cur = con.cursor()
+
+    try:
+        user_id = session["user_id"]
+
+        cur.execute(
+            "SELECT referral_code FROM users WHERE id=%s",
+            (user_id,)
+        )
+        user = cur.fetchone()
+
+        if not user:
+            flash("Account not found.")
+            return redirect("/login")
+
+        referral_code = user[0]
+
+        if not referral_code:
+            referral_code = secrets.token_hex(5).upper()
+            cur.execute(
+                "UPDATE users SET referral_code=%s WHERE id=%s",
+                (referral_code, user_id)
+            )
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS referral_commissions (
+                id SERIAL PRIMARY KEY,
+                investment_id INTEGER NOT NULL REFERENCES investments(id),
+                investor_id INTEGER NOT NULL REFERENCES users(id),
+                beneficiary_id INTEGER NOT NULL REFERENCES users(id),
+                level INTEGER NOT NULL,
+                rate NUMERIC(5,2) NOT NULL,
+                amount NUMERIC(14,2) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(investment_id, level)
+            )
+        """)
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM referrals
+            WHERE referrer_id=%s
+        """, (user_id,))
+        direct_count = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT level, COALESCE(SUM(amount), 0)
+            FROM referral_commissions
+            WHERE beneficiary_id=%s
+            GROUP BY level
+        """, (user_id,))
+        earnings = {int(row[0]): float(row[1]) for row in cur.fetchall()}
+
+        level1 = earnings.get(1, 0)
+        level2 = earnings.get(2, 0)
+        level3 = earnings.get(3, 0)
+        total = level1 + level2 + level3
+
+        referral_link = request.host_url.rstrip("/") + "/register?ref=" + referral_code
+
+        cur.execute("""
+            SELECT u.username, r.created_at
+            FROM referrals r
+            JOIN users u ON u.id=r.referred_id
+            WHERE r.referrer_id=%s
+            ORDER BY r.created_at DESC
+        """, (user_id,))
+        referral_list = cur.fetchall()
+
+        con.commit()
+
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>My Referrals - APEX INVEST</title>
+            <style>
+                * { box-sizing:border-box; }
+                body {
+                    margin:0; padding:20px;
+                    background:#07111d; color:#fff;
+                    font-family:Arial,sans-serif;
+                }
+                .container { max-width:650px; margin:25px auto; }
+                .card {
+                    background:#102235; border:1px solid #23435b;
+                    border-radius:15px; padding:20px;
+                    margin-bottom:16px;
+                }
+                h1 { color:#39e6a0; }
+                .code {
+                    font-size:25px; font-weight:bold;
+                    color:#39e6a0; letter-spacing:3px;
+                    overflow-wrap:anywhere;
+                }
+                .link {
+                    width:100%; padding:12px; border-radius:8px;
+                    border:1px solid #34536b; background:#07111d;
+                    color:white; margin:10px 0;
+                }
+                button, .back {
+                    display:inline-block; padding:13px 18px;
+                    border:0; border-radius:8px;
+                    background:#16b981; color:#061b16;
+                    font-weight:bold; text-decoration:none;
+                    cursor:pointer;
+                }
+                .stats {
+                    display:grid; grid-template-columns:1fr 1fr;
+                    gap:12px;
+                }
+                .stat {
+                    background:#0a1928; padding:15px;
+                    border-radius:10px;
+                }
+                .stat strong {
+                    display:block; color:#39e6a0;
+                    font-size:22px; margin-top:8px;
+                }
+                .muted { color:#a9bac9; }
+                .person {
+                    padding:12px 0;
+                    border-bottom:1px solid #294154;
+                }
+            </style>
+        </head>
+        <body>
+        <div class="container">
+            <h1>My Referrals</h1>
+            <p class="muted">Invite people using your personal referral link.</p>
+
+            <div class="card">
+                <p class="muted">Your referral code</p>
+                <div class="code">{{ code }}</div>
+                <p class="muted">Your referral link</p>
+                <input class="link" id="refLink" value="{{ link }}" readonly>
+                <button onclick="copyLink()">Copy Referral Link</button>
+                <p id="copyMessage" class="muted"></p>
+            </div>
+
+            <div class="card">
+                <h3>Referral Earnings</h3>
+                <div class="stats">
+                    <div class="stat">Level 1 (20%)<strong>₦{{ "%.2f"|format(l1) }}</strong></div>
+                    <div class="stat">Level 2 (3%)<strong>₦{{ "%.2f"|format(l2) }}</strong></div>
+                    <div class="stat">Level 3 (2%)<strong>₦{{ "%.2f"|format(l3) }}</strong></div>
+                    <div class="stat">Total Earnings<strong>₦{{ "%.2f"|format(total) }}</strong></div>
+                    <div class="stat">Direct Referrals<strong>{{ count }}</strong></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>People You Referred</h3>
+                {% if people %}
+                    {% for person in people %}
+                    <div class="person">
+                        <strong>{{ person[0] }}</strong><br>
+                        <span class="muted">{{ person[1] }}</span>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p class="muted">You have not referred anyone yet.</p>
+                {% endif %}
+            </div>
+
+            <a class="back" href="/dashboard">Back to Dashboard</a>
+        </div>
+
+        <script>
+        function copyLink() {
+            const field = document.getElementById("refLink");
+            field.select();
+            field.setSelectionRange(0, 99999);
+            try {
+                document.execCommand("copy");
+                document.getElementById("copyMessage").textContent =
+                    "Referral link copied!";
+            } catch (e) {
+                document.getElementById("copyMessage").textContent =
+                    "Please copy the link manually.";
+            }
+        }
+        </script>
+        </body>
+        </html>
+        """,
+        code=referral_code,
+        link=referral_link,
+        count=direct_count,
+        l1=level1,
+        l2=level2,
+        l3=level3,
+        total=total,
+        people=referral_list)
+
+    except Exception:
+        con.rollback()
+        app.logger.exception("Referral page failed")
+        flash("Could not load referrals. Please try again.")
+        return redirect("/dashboard")
+    finally:
+        cur.close()
+        con.close()
 
 
 @app.route("/dashboard")
@@ -1130,8 +1384,22 @@ def activate_plan():
     cur = con.cursor()
 
     try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS referral_commissions (
+                id SERIAL PRIMARY KEY,
+                investment_id INTEGER NOT NULL REFERENCES investments(id),
+                investor_id INTEGER NOT NULL REFERENCES users(id),
+                beneficiary_id INTEGER NOT NULL REFERENCES users(id),
+                level INTEGER NOT NULL,
+                rate NUMERIC(5,2) NOT NULL,
+                amount NUMERIC(14,2) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(investment_id, level)
+            )
+        """)
+
         cur.execute(
-            "SELECT balance FROM users WHERE id=%s FOR UPDATE",
+            "SELECT balance, referred_by FROM users WHERE id=%s FOR UPDATE",
             (session["user_id"],)
         )
         row = cur.fetchone()
@@ -1141,7 +1409,8 @@ def activate_plan():
             flash("Account not found.")
             return redirect("/dashboard")
 
-        balance = row[0] or 0
+        balance, sponsor_id = row
+        balance = balance or 0
 
         if balance < amount:
             con.rollback()
@@ -1157,7 +1426,10 @@ def activate_plan():
             INSERT INTO investments
             (user_id, plan, amount, status)
             VALUES (%s, %s, %s, 'active')
+            RETURNING id
         """, (session["user_id"], plan, amount))
+
+        investment_id = cur.fetchone()[0]
 
         cur.execute("""
             INSERT INTO transactions
@@ -1169,8 +1441,64 @@ def activate_plan():
             -amount
         ))
 
+        # Three-level referral commissions: 20%, 3%, and 2%.
+        rates = [20, 3, 2]
+        current_sponsor = sponsor_id
+        visited = {session["user_id"]}
+        paid_levels = 0
+
+        for level, rate in enumerate(rates, start=1):
+            if not current_sponsor or current_sponsor in visited:
+                break
+
+            visited.add(current_sponsor)
+            commission = round(float(amount) * rate / 100, 2)
+
+            cur.execute("""
+                INSERT INTO referral_commissions
+                (investment_id, investor_id, beneficiary_id, level, rate, amount)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (investment_id, level) DO NOTHING
+                RETURNING id
+            """, (
+                investment_id,
+                session["user_id"],
+                current_sponsor,
+                level,
+                rate,
+                commission
+            ))
+
+            commission_row = cur.fetchone()
+
+            if commission_row:
+                cur.execute("""
+                    UPDATE users
+                    SET balance = balance + %s
+                    WHERE id = %s
+                """, (commission, current_sponsor))
+
+                cur.execute("""
+                    INSERT INTO transactions
+                    (user_id, type, amount, status)
+                    VALUES (%s, %s, %s, 'completed')
+                """, (
+                    current_sponsor,
+                    "Referral commission - Level " + str(level),
+                    commission
+                ))
+
+                paid_levels += 1
+
+            cur.execute(
+                "SELECT referred_by FROM users WHERE id=%s",
+                (current_sponsor,)
+            )
+            sponsor_row = cur.fetchone()
+            current_sponsor = sponsor_row[0] if sponsor_row else None
+
         con.commit()
-        flash(plan + " activation successful!")
+        flash(plan + " activation successful! Referral commissions processed.")
 
     except Exception:
         con.rollback()
@@ -1181,7 +1509,6 @@ def activate_plan():
         con.close()
 
     return redirect("/dashboard")
-
 
 
 @app.route("/daily-rewards", methods=["GET", "POST"])
