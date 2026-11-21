@@ -63,6 +63,24 @@ def init_db():
     """)
 
     cur.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS site_settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        INSERT INTO site_settings(setting_key, setting_value)
+        VALUES ('withdrawals_open', 'true')
+        ON CONFLICT (setting_key) DO NOTHING
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS investments (
             id SERIAL PRIMARY KEY,
             user_id INTEGER REFERENCES users(id),
@@ -879,6 +897,10 @@ def login():
         con.close()
 
         if user and check_password_hash(user["password"],password):
+            if user.get("is_banned", False):
+                flash("Your account has been suspended. Please contact support.")
+                return redirect("/login")
+
             session["user_id"] = user["id"]
             session["username"] = user["username"]
             return redirect("/dashboard")
@@ -1761,6 +1783,33 @@ def withdraw():
     if not session.get("user_id"):
         return redirect("/login")
 
+    con = db()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            "SELECT is_banned FROM users WHERE id=%s",
+            (session["user_id"],)
+        )
+        account = cur.fetchone()
+        if not account or account[0]:
+            session.clear()
+            flash("Your account is suspended.")
+            return redirect("/login")
+
+        cur.execute(
+            "SELECT setting_value FROM site_settings WHERE setting_key='withdrawals_open'"
+        )
+        setting = cur.fetchone()
+        withdrawals_open = bool(setting and setting[0] == "true")
+    finally:
+        cur.close()
+        con.close()
+
+    if not withdrawals_open:
+        return render_template_string(
+            STYLE + "<main style='max-width:500px;margin:60px auto;padding:25px;color:#ffe19a;text-align:center'><h2>Withdrawals Temporarily Closed</h2><p>New withdrawal requests are currently unavailable. Please check again later.</p><a href='/dashboard'>Back to Dashboard</a></main>"
+        )
+
     message = None
     success = False
 
@@ -2218,6 +2267,21 @@ def admin_dashboard():
         total_users = cur.fetchone()["total"]
 
         cur.execute("""
+            SELECT id, fullname, username, phone, is_banned
+            FROM users
+            ORDER BY created_at DESC
+            LIMIT 200
+        """)
+        managed_users = cur.fetchall()
+
+        cur.execute("""
+            SELECT setting_value FROM site_settings
+            WHERE setting_key='withdrawals_open'
+        """)
+        setting = cur.fetchone()
+        withdrawals_open = bool(setting and setting["setting_value"] == "true")
+
+        cur.execute("""
             SELECT COUNT(*) AS total
             FROM deposit_requests WHERE status='pending'
         """)
@@ -2558,6 +2622,49 @@ def admin_dashboard():
 
           <section class="admin-section">
             <div class="section-heading">
+              <h2>⚙️ Platform Controls</h2>
+            </div>
+            <p>Withdrawal status:
+              <strong>{{ "OPEN" if withdrawals_open else "CLOSED" }}</strong>
+            </p>
+            <form method="POST" action="/admin/withdrawal-toggle">
+              <input type="hidden" name="open" value="{{ 'false' if withdrawals_open else 'true' }}">
+              <button class="approve" type="submit">
+                {{ "CLOSE WITHDRAWALS" if withdrawals_open else "OPEN WITHDRAWALS" }}
+              </button>
+            </form>
+          </section>
+
+          <section class="admin-section">
+            <div class="section-heading">
+              <h2>👥 User Ban Management</h2>
+              <span class="section-count">{{total_users}} USERS</span>
+            </div>
+            <div class="request-grid">
+            {% for u in managed_users %}
+              <div class="request">
+                <h3>{{u.fullname}}</h3>
+                <p><strong>Username:</strong> {{u.username}}</p>
+                <p><strong>Phone:</strong> {{u.phone}}</p>
+                <p><strong>Status:</strong>
+                  {{ "BANNED" if u.is_banned else "ACTIVE" }}
+                </p>
+                <form method="POST" action="/admin/user-action">
+                  <input type="hidden" name="user_id" value="{{u.id}}">
+                  <input type="hidden" name="action" value="{{'unban' if u.is_banned else 'ban'}}">
+                  <button class="{{'approve' if u.is_banned else 'reject'}}" type="submit">
+                    {{ "UNBAN USER" if u.is_banned else "BAN USER" }}
+                  </button>
+                </form>
+              </div>
+            {% else %}
+              <p>No users found.</p>
+            {% endfor %}
+            </div>
+          </section>
+
+          <section class="admin-section">
+            <div class="section-heading">
               <h2>💳 Deposit Management</h2>
               <span class="section-count">{{pending_deposits}} PENDING</span>
             </div>
@@ -2644,7 +2751,9 @@ def admin_dashboard():
         pending_deposits=pending_deposits,
         pending_withdrawals=pending_withdrawals,
         deposits=deposits,
-        withdrawals=withdrawals
+        withdrawals=withdrawals,
+        managed_users=managed_users,
+        withdrawals_open=withdrawals_open
         )
 
     except Exception:
@@ -2757,6 +2866,67 @@ def admin_action():
         con.rollback()
         app.logger.exception("Admin action failed")
         return "Admin action failed. Check the Termux terminal.", 500
+    finally:
+        cur.close()
+        con.close()
+
+    return redirect("/admin/dashboard")
+
+
+@app.route("/admin/user-action", methods=["POST"])
+def admin_user_action():
+    if not session.get("admin_logged_in"):
+        return redirect("/admin")
+
+    action = request.form.get("action")
+    user_id = request.form.get("user_id")
+
+    if action not in ("ban", "unban") or not user_id or not user_id.isdigit():
+        return redirect("/admin/dashboard")
+
+    con = db()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            "UPDATE users SET is_banned=%s WHERE id=%s",
+            (action == "ban", int(user_id))
+        )
+        con.commit()
+        flash("User " + ("banned." if action == "ban" else "unbanned."))
+    except Exception:
+        con.rollback()
+        app.logger.exception("User ban action failed")
+        flash("Could not update user status.")
+    finally:
+        cur.close()
+        con.close()
+
+    return redirect("/admin/dashboard")
+
+
+@app.route("/admin/withdrawal-toggle", methods=["POST"])
+def admin_withdrawal_toggle():
+    if not session.get("admin_logged_in"):
+        return redirect("/admin")
+
+    value = request.form.get("open")
+    if value not in ("true", "false"):
+        return redirect("/admin/dashboard")
+
+    con = db()
+    cur = con.cursor()
+    try:
+        cur.execute("""
+            UPDATE site_settings
+            SET setting_value=%s
+            WHERE setting_key='withdrawals_open'
+        """, (value,))
+        con.commit()
+        flash("Withdrawals are now " + ("OPEN." if value == "true" else "CLOSED."))
+    except Exception:
+        con.rollback()
+        app.logger.exception("Withdrawal toggle failed")
+        flash("Could not update withdrawal settings.")
     finally:
         cur.close()
         con.close()
