@@ -66,6 +66,11 @@ def init_db():
         ALTER TABLE users
         ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE
     """)
+    cur.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS welcome_bonus_unlocked BOOLEAN NOT NULL DEFAULT FALSE
+
+    """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS site_settings (
@@ -1516,8 +1521,14 @@ def activate_plan():
             sponsor_row = cur.fetchone()
             current_sponsor = sponsor_row[0] if sponsor_row else None
 
+        cur.execute("""
+            UPDATE users
+            SET welcome_bonus_unlocked = TRUE
+            WHERE id = %s
+        """, (session["user_id"],))
+
         con.commit()
-        flash(plan + " activation successful! Referral commissions processed.")
+        flash(plan + " activation successful! Referral commissions processed. Your welcome bonus is now unlocked.")
 
     except Exception:
         con.rollback()
@@ -1839,13 +1850,15 @@ def withdraw():
             cur = con.cursor()
             try:
                 cur.execute(
-                    "SELECT balance FROM users WHERE id=%s FOR UPDATE",
+                    "SELECT balance, welcome_bonus_unlocked FROM users WHERE id=%s FOR UPDATE",
                     (session["user_id"],)
                 )
                 row = cur.fetchone()
 
                 if not row:
                     message = "Account not found. Please login again."
+                elif not row[1]:
+                    message = "Activate a plan first to unlock your ₦400 welcome bonus."
                 else:
                     balance = Decimal(str(row[0] or 0))
 
