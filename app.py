@@ -1118,6 +1118,9 @@ def referrals():
                     <div class="stat">Total Earnings<strong>₦{{ "%.2f"|format(total) }}</strong></div>
                     <div class="stat">Direct Referrals<strong>{{ count }}</strong></div>
                 </div>
+                <p class="muted" style="margin-top:18px;padding:14px;background:#0a1928;border-radius:10px;line-height:1.6">
+                    💰 <strong>Wallet Information:</strong> All referral commissions are automatically credited to your normal account balance. You do not have a separate referral wallet.
+                </p>
             </div>
 
             <div class="card">
