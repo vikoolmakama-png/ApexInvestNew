@@ -1345,6 +1345,12 @@ def dashboard():
         <div class="balance-number">₦{{"{:,.2f}".format(user.balance)}}</div>
       </div>
 
+      <a class="glow-btn gold" href="https://t.me/Apexinvestsite"
+         target="_blank" rel="noopener noreferrer"
+         style="display:block;text-align:center;margin:18px 0 25px;padding:16px">
+         ✈ JOIN OUR TELEGRAM GROUP
+      </a>
+
       <h2 class="section-title">✦ Account Activities</h2>
 
       <div class="action-grid">
