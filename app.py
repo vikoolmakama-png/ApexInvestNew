@@ -11,8 +11,19 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-apex-secret")
 @app.after_request
 def close_html_document(response):
     if response.mimetype == "text/html":
+        footer = """
+        <footer style="text-align:center;padding:22px 12px;margin-top:30px;
+        border-top:1px solid rgba(255,255,255,.15);color:#aaa;font-size:14px;">
+            <p>Created by <strong style="color:#39ff85;">Webfix Tech</strong></p>
+            <a href="https://wa.me/2348021266718" target="_blank"
+               rel="noopener noreferrer"
+               style="color:#39ff85;text-decoration:none;">
+                WhatsApp: 08021266718
+            </a>
+        </footer>
+        """
         response.set_data(
-            response.get_data(as_text=True) + "</body></html>"
+            response.get_data(as_text=True) + footer + "</body></html>"
         )
     return response
 
