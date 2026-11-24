@@ -131,6 +131,19 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        ALTER TABLE withdrawals
+        ADD COLUMN IF NOT EXISTS fee_amount NUMERIC(14,2) NOT NULL DEFAULT 0
+    """)
+    cur.execute("""
+        ALTER TABLE withdrawals
+        ADD COLUMN IF NOT EXISTS payable_amount NUMERIC(14,2) NOT NULL DEFAULT 0
+    """)
+    cur.execute("""
+        UPDATE withdrawals
+        SET payable_amount = amount
+        WHERE payable_amount = 0 AND amount > 0
+    """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS deposit_requests (
@@ -1883,18 +1896,32 @@ def withdraw():
                         if cur.rowcount != 1:
                             message = "Insufficient available balance."
                         else:
+                            from decimal import ROUND_HALF_UP
+                            amount = amount.quantize(Decimal("0.01"))
+                            fee_amount = (amount * Decimal("0.10")).quantize(
+                                Decimal("0.01"), rounding=ROUND_HALF_UP
+                            )
+                            payable_amount = amount - fee_amount
+
                             cur.execute("""
                                 INSERT INTO withdrawals
                                 (user_id, bank_name, account_name,
-                                 account_number, amount, status)
-                                VALUES (%s,%s,%s,%s,%s,'pending')
+                                 account_number, amount, fee_amount,
+                                 payable_amount, status)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,'pending')
                             """, (
                                 session["user_id"], bank, account_name,
-                                account_number, amount
+                                account_number, amount, fee_amount,
+                                payable_amount
                             ))
                             con.commit()
                             success = True
-                            message = "Withdrawal deducted successfully. Awaiting admin approval."
+                            message = (
+                                f"Request submitted! Requested: ₦{amount:,.2f} | "
+                                f"10% fee: ₦{fee_amount:,.2f} | "
+                                f"You will receive: ₦{payable_amount:,.2f}. "
+                                "Awaiting admin approval."
+                            )
 
             except Exception:
                 con.rollback()
@@ -2327,7 +2354,8 @@ def admin_dashboard():
 
         cur.execute("""
             SELECT w.id, w.bank_name, w.account_name,
-                   w.account_number, w.amount, w.status,
+                   w.account_number, w.amount, w.fee_amount,
+                   w.payable_amount, w.status,
                    w.created_at, u.username, u.fullname
             FROM withdrawals w
             JOIN users u ON u.id=w.user_id
@@ -2739,7 +2767,9 @@ def admin_dashboard():
                 <p><strong>Bank:</strong> {{w.bank_name}}</p>
                 <p><strong>Account name:</strong> {{w.account_name}}</p>
                 <p><strong>Account number:</strong> {{w.account_number}}</p>
-                <p class="request-amount">₦{{"{:,.2f}".format(w.amount)}}</p>
+                <p><strong>Requested:</strong> ₦{{"{:,.2f}".format(w.amount)}}</p>
+                <p><strong>10% fee:</strong> ₦{{"{:,.2f}".format(w.fee_amount)}}</p>
+                <p class="request-amount"><strong>Amount to pay:</strong> ₦{{"{:,.2f}".format(w.payable_amount)}}</p>
                 <p><strong>Date:</strong> {{w.created_at}}</p>
                 <p><strong>Status:</strong> <span class="status">{{w.status|upper}}</span></p>
 
@@ -2805,7 +2835,7 @@ def admin_action():
         table = "deposit_requests" if kind == "deposit" else "withdrawals"
 
         cur.execute(
-            f"SELECT id, user_id, amount, status FROM {table} WHERE id=%s FOR UPDATE",
+            f"SELECT id, user_id, amount, status, payable_amount FROM {table} WHERE id=%s FOR UPDATE",
             (request_id,)
         )
         item = cur.fetchone()
@@ -2875,7 +2905,7 @@ def admin_action():
             flash("Request status changed. Please refresh.")
             return redirect("/admin/dashboard")
 
-        transaction_amount = amount if kind == "deposit" else -amount
+        transaction_amount = amount if kind == "deposit" else -item[4]
 
         cur.execute("""
             INSERT INTO transactions (user_id, type, amount, status)
